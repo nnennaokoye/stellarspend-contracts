@@ -2,7 +2,13 @@
 
 #![cfg(test)]
 
-use crate::{Transaction, TransactionAnalyticsContract, TransactionAnalyticsContractClient};
+use crate::{
+    RatingInput,
+    RatingStatus,
+    Transaction,
+    TransactionAnalyticsContract,
+    TransactionAnalyticsContractClient,
+};
 use soroban_sdk::{
     testutils::{Address as _, Events},
     Address, Env, Symbol, Vec,
@@ -398,4 +404,99 @@ fn test_same_category_aggregation() {
 
     assert_eq!(metrics.tx_count, 3);
     assert_eq!(metrics.total_volume, 600);
+}
+
+#[test]
+fn test_submit_ratings_success_multiple() {
+    let (env, admin, client) = setup_test_env();
+
+    let mut transactions: Vec<Transaction> = Vec::new(&env);
+    transactions.push_back(create_transaction(&env, 1, 100, "transfer"));
+    transactions.push_back(create_transaction(&env, 2, 200, "transfer"));
+
+    client.process_batch(&admin, &transactions, &None);
+
+    let user = Address::generate(&env);
+
+    let mut ratings: Vec<RatingInput> = Vec::new(&env);
+    ratings.push_back(RatingInput { tx_id: 1, score: 5 });
+    ratings.push_back(RatingInput { tx_id: 2, score: 4 });
+
+    let results = client.submit_ratings(&user, &ratings);
+
+    assert_eq!(results.len(), 2);
+
+    let r0 = results.get(0).unwrap();
+    assert_eq!(r0.tx_id, 1);
+    assert_eq!(r0.score, 5);
+    assert_eq!(r0.status, RatingStatus::Success);
+
+    let r1 = results.get(1).unwrap();
+    assert_eq!(r1.tx_id, 2);
+    assert_eq!(r1.score, 4);
+    assert_eq!(r1.status, RatingStatus::Success);
+}
+
+#[test]
+fn test_submit_ratings_partial_failures() {
+    let (env, admin, client) = setup_test_env();
+
+    let mut transactions: Vec<Transaction> = Vec::new(&env);
+    transactions.push_back(create_transaction(&env, 1, 100, "transfer"));
+
+    client.process_batch(&admin, &transactions, &None);
+
+    let user = Address::generate(&env);
+
+    let mut ratings: Vec<RatingInput> = Vec::new(&env);
+    ratings.push_back(RatingInput { tx_id: 1, score: 5 });
+    ratings.push_back(RatingInput { tx_id: 1, score: 0 });
+    ratings.push_back(RatingInput { tx_id: 999, score: 3 });
+
+    let results = client.submit_ratings(&user, &ratings);
+
+    assert_eq!(results.len(), 3);
+
+    let r0 = results.get(0).unwrap();
+    assert_eq!(r0.status, RatingStatus::Success);
+
+    let r1 = results.get(1).unwrap();
+    assert_eq!(r1.status, RatingStatus::InvalidScore);
+
+    let r2 = results.get(2).unwrap();
+    assert_eq!(r2.status, RatingStatus::UnknownTransaction);
+}
+
+#[test]
+#[should_panic]
+fn test_submit_ratings_empty_batch_rejected() {
+    let (env, _admin, client) = setup_test_env();
+
+    let user = Address::generate(&env);
+    let ratings: Vec<RatingInput> = Vec::new(&env);
+
+    client.submit_ratings(&user, &ratings);
+}
+
+#[test]
+fn test_rating_events_emitted_for_each_rating() {
+    let (env, admin, client) = setup_test_env();
+
+    let mut transactions: Vec<Transaction> = Vec::new(&env);
+    transactions.push_back(create_transaction(&env, 1, 100, "transfer"));
+    transactions.push_back(create_transaction(&env, 2, 200, "transfer"));
+
+    client.process_batch(&admin, &transactions, &None);
+
+    let user = Address::generate(&env);
+
+    let mut ratings: Vec<RatingInput> = Vec::new(&env);
+    ratings.push_back(RatingInput { tx_id: 1, score: 5 });
+    ratings.push_back(RatingInput { tx_id: 2, score: 4 });
+
+    client.submit_ratings(&user, &ratings);
+
+    let events = env.events().all();
+
+    assert!(events.len() >= 2);
 }
