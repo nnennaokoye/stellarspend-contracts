@@ -262,7 +262,7 @@ impl TransactionAnalyticsContract {
             let result = RatingResult {
                 tx_id: input.tx_id,
                 score: input.score,
-                status,
+                status: status.clone(),
             };
 
             AnalyticsEvents::rating_submitted(&env, &user, input.tx_id, input.score, status);
