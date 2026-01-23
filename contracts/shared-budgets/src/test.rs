@@ -1,4 +1,4 @@
-//! Integration tests for the Shared Budgets Contract.
+// Integration tests for the Shared Budgets Contract.
 
 #![cfg(test)]
 

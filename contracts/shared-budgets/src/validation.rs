@@ -1,4 +1,4 @@
-//! Validation helpers for shared budget allocations.
+// Validation helpers for shared budget allocations.
 
 use soroban_sdk::{Address, Env};
 

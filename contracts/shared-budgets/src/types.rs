@@ -1,4 +1,4 @@
-//! Types and events for shared budget batch allocations.
+// Types and events for shared budget batch allocations.
 
 use soroban_sdk::{contracttype, symbol_short, Address, Env, Vec};
 
