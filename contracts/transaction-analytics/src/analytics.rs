@@ -1,11 +1,3 @@
-//! Core batch analytics computation logic.
-//!
-//! This module provides optimized batch processing for transaction analytics,
-//! following Soroban best practices:
-//! - Minimizes storage operations by accumulating changes locally
-//! - Uses fixed-size structures where possible
-//! - Batches computations to reduce gas costs
-
 use soroban_sdk::{Address, Env, Map, Symbol, Vec};
 
 use crate::AuditLog;
