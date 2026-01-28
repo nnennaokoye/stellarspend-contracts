@@ -1,17 +1,21 @@
-//! Core batch analytics computation logic.
-//!
-//! This module provides optimized batch processing for transaction analytics,
-//! following Soroban best practices:
-//! - Minimizes storage operations by accumulating changes locally
-//! - Uses fixed-size structures where possible
-//! - Batches computations to reduce gas costs
-
 use soroban_sdk::{Address, Env, Map, Symbol, Vec};
 
+use crate::AuditLog;
 use crate::types::{
     BatchMetrics, BundleResult, BundledTransaction, CategoryMetrics, Transaction,
     ValidationResult, MAX_BATCH_SIZE,
 };
+
+/// Calculates the processing fee for a transaction amount.
+///
+/// Current fee model: 0.1% (10 basis points)
+pub fn calculate_fee(amount: i128) -> i128 {
+    if amount <= 0 {
+        return 0;
+    }
+    // 0.1% = amount * 10 / 10000 = amount / 1000
+    amount / 1000
+}
 
 /// Computes aggregated metrics for a batch of transactions.
 ///
@@ -33,12 +37,14 @@ pub fn compute_batch_metrics(
             max_amount: 0,
             unique_senders: 0,
             unique_recipients: 0,
+            total_fees: 0,
             processed_at,
         };
     }
 
     // Accumulate metrics in a single pass (optimization: avoid multiple iterations)
     let mut total_volume: i128 = 0;
+    let mut total_fees: i128 = 0;
     let mut min_amount: i128 = i128::MAX;
     let mut max_amount: i128 = i128::MIN;
 
@@ -49,6 +55,10 @@ pub fn compute_batch_metrics(
     for tx in transactions.iter() {
         // Accumulate volume
         total_volume = total_volume.checked_add(tx.amount).unwrap_or(i128::MAX);
+
+        // Calculate and accumulate fees
+        let fee = calculate_fee(tx.amount);
+        total_fees = total_fees.checked_add(fee).unwrap_or(i128::MAX);
 
         // Track min/max
         if tx.amount < min_amount {
@@ -78,6 +88,7 @@ pub fn compute_batch_metrics(
         max_amount,
         unique_senders: senders.len(),
         unique_recipients: recipients.len(),
+        total_fees,
         processed_at,
     }
 }
@@ -90,21 +101,27 @@ pub fn compute_category_metrics(
     transactions: &Vec<Transaction>,
     total_volume: i128,
 ) -> Vec<CategoryMetrics> {
-    let mut category_map: Map<Symbol, (u32, i128)> = Map::new(env);
+    // Map stores (tx_count, total_volume, total_fees)
+    let mut category_map: Map<Symbol, (u32, i128, i128)> = Map::new(env);
 
     // Single pass to aggregate by category
     for tx in transactions.iter() {
-        let current = category_map.get(tx.category.clone()).unwrap_or((0, 0));
+        let current = category_map.get(tx.category.clone()).unwrap_or((0, 0, 0));
+        let fee = calculate_fee(tx.amount);
         category_map.set(
             tx.category.clone(),
-            (current.0 + 1, current.1.checked_add(tx.amount).unwrap_or(i128::MAX)),
+            (
+                current.0 + 1,
+                current.1.checked_add(tx.amount).unwrap_or(i128::MAX),
+                current.2.checked_add(fee).unwrap_or(i128::MAX),
+            ),
         );
     }
 
     // Convert to CategoryMetrics vector
     let mut result: Vec<CategoryMetrics> = Vec::new(env);
 
-    for (category, (tx_count, volume)) in category_map.iter() {
+    for (category, (tx_count, volume, fees)) in category_map.iter() {
         // Calculate percentage in basis points (10000 = 100%)
         let volume_percentage_bps = if total_volume > 0 {
             ((volume * 10000) / total_volume) as u32
@@ -116,6 +133,7 @@ pub fn compute_category_metrics(
             category,
             tx_count,
             total_volume: volume,
+            total_fees: fees,
             volume_percentage_bps,
         });
     }
@@ -166,6 +184,26 @@ pub fn validate_batch(transactions: &Vec<Transaction>) -> Result<(), &'static st
     Ok(())
 }
 
+/// Validates a batch of audit logs.
+pub fn validate_audit_logs(logs: &Vec<AuditLog>) -> Result<(), &'static str> {
+    if logs.len() == 0 {
+        return Err("Audit logs batch cannot be empty");
+    }
+
+    if logs.len() > MAX_BATCH_SIZE {
+        return Err("Audit logs batch exceeds maximum size");
+    }
+
+    for log in logs.iter() {
+        // Simple check: operation cannot be empty
+        if log.timestamp == 0 {
+            return Err("Audit log timestamp cannot be zero");
+        }
+    }
+
+    Ok(())
+}
+
 /// Computes a simple checksum for batch integrity verification.
 pub fn compute_batch_checksum(transactions: &Vec<Transaction>) -> u64 {
     let mut checksum: u64 = 0;
@@ -207,7 +245,7 @@ pub fn validate_transaction_for_bundle(
         };
     }
 
-    // Validate amount is not zero (optional - you might want to allow zero)
+    // Validate amount is not zero 
     // For now, we'll allow zero amounts
 
     // Transaction is valid
@@ -240,7 +278,7 @@ pub fn validate_bundle_transactions(
 ///
 /// Computes bundle metrics and determines if the bundle can be created.
 pub fn create_bundle_result(
-    env: &Env,
+    _env: &Env,
     bundle_id: u64,
     bundled_transactions: &Vec<BundledTransaction>,
     validation_results: &Vec<ValidationResult>,

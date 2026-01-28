@@ -1,6 +1,6 @@
 //! Data types and events for batch transaction analytics.
 
-use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol};
+use soroban_sdk::{contracttype, symbol_short, Address, Env, Symbol, Vec};
 
 /// Maximum number of transactions in a single batch for optimization.
 pub const MAX_BATCH_SIZE: u32 = 100;
@@ -23,6 +23,20 @@ pub struct Transaction {
     pub category: Symbol,
 }
 
+/// Represents a single audit log entry.
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct AuditLog {
+    /// Address of the actor who performed the operation
+    pub actor: Address,
+    /// The operation performed (e.g., "init", "config_update")
+    pub operation: Symbol,
+    /// Timestamp of the operation
+    pub timestamp: u64,
+    /// Status of the operation (e.g., "success", "failure")
+    pub status: Symbol,
+}
+
 /// Aggregated metrics for a batch of transactions.
 #[derive(Clone, Debug, Default)]
 #[contracttype]
@@ -41,6 +55,8 @@ pub struct BatchMetrics {
     pub unique_senders: u32,
     /// Number of unique recipients
     pub unique_recipients: u32,
+    /// Total fees collected for the batch
+    pub total_fees: i128,
     /// Batch processing timestamp
     pub processed_at: u64,
 }
@@ -55,6 +71,8 @@ pub struct CategoryMetrics {
     pub tx_count: u32,
     /// Total volume for this category
     pub total_volume: i128,
+    /// Total fees for this category
+    pub total_fees: i128,
     /// Percentage of total batch volume (basis points, 10000 = 100%)
     pub volume_percentage_bps: u32,
 }
@@ -104,6 +122,64 @@ pub struct BundleResult {
     pub created_at: u64,
 }
 
+/// Input for submitting a rating for a transaction.
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct RatingInput {
+    pub tx_id: u64,
+    pub score: u32,
+}
+
+/// Status of a submitted rating.
+#[derive(Clone, Debug)]
+#[contracttype]
+pub enum RatingStatus {
+    Success,
+    InvalidScore,
+    UnknownTransaction,
+}
+
+/// Result of a submitted rating.
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct RatingResult {
+    pub tx_id: u64,
+    pub score: u32,
+    pub status: RatingStatus,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[contracttype]
+pub enum TransactionStatus {
+    Pending,
+    Completed,
+    Failed,
+    Refunded,
+}
+
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct TransactionStatusUpdate {
+    pub tx_id: u64,
+    pub status: TransactionStatus,
+}
+
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct StatusUpdateResult {
+    pub tx_id: u64,
+    pub is_valid: bool,
+}
+
+#[derive(Clone, Debug)]
+#[contracttype]
+pub struct BatchStatusUpdateResult {
+    pub total_requests: u32,
+    pub successful: u32,
+    pub failed: u32,
+    pub results: Vec<StatusUpdateResult>,
+}
+
 /// Storage keys for contract state.
 #[derive(Clone)]
 #[contracttype]
@@ -116,10 +192,21 @@ pub enum DataKey {
     BatchMetrics(u64),
     /// Total transactions processed lifetime
     TotalTxProcessed,
+    /// Stored audit log for a specific index
+    AuditLog(u64),
+    /// Total number of audit logs stored
+    TotalAuditLogs,
+
     /// Last bundle ID
     LastBundleId,
     /// Stored bundle result for a specific bundle ID
     BundleResult(u64),
+    /// Marker for a known transaction ID
+    KnownTransaction(u64),
+    /// Stored rating per (tx_id, user)
+    Rating(u64, Address),
+    /// Stored status per transaction ID
+    TransactionStatus(u64),
 }
 
 /// Events emitted by the analytics contract.
@@ -134,7 +221,11 @@ impl AnalyticsEvents {
 
     /// Event emitted for each category in a batch.
     pub fn category_analytics(env: &Env, batch_id: u64, category_metrics: &CategoryMetrics) {
-        let topics = (symbol_short!("category"), batch_id, &category_metrics.category);
+        let topics = (
+            symbol_short!("category"),
+            batch_id,
+            &category_metrics.category,
+        );
         env.events().publish(topics, category_metrics.clone());
     }
 
@@ -154,6 +245,39 @@ impl AnalyticsEvents {
     pub fn high_value_alert(env: &Env, batch_id: u64, tx_id: u64, amount: i128) {
         let topics = (symbol_short!("alert"), symbol_short!("highval"));
         env.events().publish(topics, (batch_id, tx_id, amount));
+    }
+
+    /// Event emitted when an audit log is created.
+    pub fn audit_logged(env: &Env, actor: &Address, operation: &Symbol, status: &Symbol) {
+        let topics = (symbol_short!("audit"), symbol_short!("log"), actor);
+        env.events().publish(topics, (operation, status));
+    }
+
+    /// Event emitted when a rating is submitted.
+    pub fn rating_submitted(
+        env: &Env,
+        user: &Address,
+        tx_id: u64,
+        score: u32,
+        status: RatingStatus,
+    ) {
+        let topics = (symbol_short!("rating"), symbol_short!("submit"), user);
+        env.events().publish(topics, (tx_id, score, status));
+    }
+
+    pub fn transaction_status_updated(
+        env: &Env,
+        tx_id: u64,
+        previous_status: Option<TransactionStatus>,
+        new_status: TransactionStatus,
+    ) {
+        let topics = (symbol_short!("status"), symbol_short!("updated"));
+        env.events().publish(topics, (tx_id, previous_status, new_status));
+    }
+
+    pub fn transaction_status_update_failed(env: &Env, tx_id: u64) {
+        let topics = (symbol_short!("status"), symbol_short!("failed"));
+        env.events().publish(topics, tx_id);
     }
 
     /// Event emitted when a transaction bundle is created.
@@ -185,12 +309,7 @@ impl AnalyticsEvents {
     }
 
     /// Event emitted when a transaction fails validation in a bundle.
-    pub fn transaction_validation_failed(
-        env: &Env,
-        bundle_id: u64,
-        tx_id: u64,
-        error: &Symbol,
-    ) {
+    pub fn transaction_validation_failed(env: &Env, bundle_id: u64, tx_id: u64, error: &Symbol) {
         let topics = (symbol_short!("bundle"), symbol_short!("failed"), bundle_id);
         env.events().publish(topics, (tx_id, error.clone()));
     }

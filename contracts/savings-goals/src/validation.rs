@@ -1,0 +1,235 @@
+//! Validation logic for savings goal requests.
+
+use soroban_sdk::{Address, Env};
+
+use crate::types::{ErrorCode, SavingsGoalRequest, MAX_GOAL_AMOUNT, MIN_GOAL_AMOUNT};
+
+/// Validates a savings goal request.
+///
+/// # Returns
+/// * `Ok(())` if valid
+/// * `Err(error_code)` if invalid
+pub fn validate_goal_request(env: &Env, request: &SavingsGoalRequest) -> Result<(), u32> {
+    // Validate user address - ensure it's not empty/invalid
+    // Note: Soroban SDK doesn't provide a direct way to validate Address format,
+    // but we can check basic properties
+    if !is_valid_address(&request.user) {
+        return Err(ErrorCode::INVALID_USER_ADDRESS);
+    }
+
+    // Validate goal name - should not be empty
+    // Symbol validation: In Soroban, symbols are always valid by construction
+    // and cannot be empty. This check is for consistency with validation patterns.
+    // Note: Symbol doesn't have to_string() in no_std environment
+
+    // Validate target amount
+    if !is_valid_amount(request.target_amount) {
+        return Err(ErrorCode::INVALID_AMOUNT);
+    }
+
+    // Validate deadline
+    if !is_valid_deadline(env, request.deadline) {
+        return Err(ErrorCode::INVALID_DEADLINE);
+    }
+
+    // Validate initial contribution
+    if !is_valid_initial_contribution(request.initial_contribution, request.target_amount) {
+        return Err(ErrorCode::INVALID_INITIAL_CONTRIBUTION);
+    }
+
+    Ok(())
+}
+
+/// Validates that an address is valid.
+///
+/// In Soroban, all Address instances are valid by construction,
+/// but we can check for basic sanity.
+fn is_valid_address(_address: &Address) -> bool {
+    // Address is always valid in Soroban SDK by construction
+    // This function exists for consistency with validation patterns
+    // and potential future enhancements
+    true
+}
+
+/// Validates that an amount is within acceptable bounds.
+///
+/// # Arguments
+/// * `amount` - The amount to validate
+///
+/// # Returns
+/// * `true` if amount is >= MIN_GOAL_AMOUNT and <= MAX_GOAL_AMOUNT
+pub fn is_valid_amount(amount: i128) -> bool {
+    amount >= MIN_GOAL_AMOUNT && amount <= MAX_GOAL_AMOUNT
+}
+
+/// Validates that a deadline is in the future but not too far.
+///
+/// # Arguments
+/// * `env` - The contract environment
+/// * `deadline` - The deadline ledger sequence number
+///
+/// # Returns
+/// * `true` if deadline is valid
+pub fn is_valid_deadline(env: &Env, deadline: u64) -> bool {
+    let current_ledger = env.ledger().sequence() as u64;
+
+    // Deadline must be in the future
+    if deadline <= current_ledger {
+        return false;
+    }
+
+    // Deadline should not be more than ~5 years in the future
+    // Assuming ~5 second ledger close time, 5 years = ~31.5M ledgers
+    let max_future_ledgers = 31_536_000u64; // ~5 years
+    if deadline > current_ledger + max_future_ledgers {
+        return false;
+    }
+
+    true
+}
+
+/// Validates that initial contribution is valid.
+///
+/// # Arguments
+/// * `initial_contribution` - The initial contribution amount
+/// * `target_amount` - The target goal amount
+///
+/// # Returns
+/// * `true` if initial contribution is valid
+pub fn is_valid_initial_contribution(initial_contribution: i128, target_amount: i128) -> bool {
+    // Initial contribution must be non-negative
+    if initial_contribution < 0 {
+        return false;
+    }
+
+    // Initial contribution cannot exceed target amount
+    if initial_contribution > target_amount {
+        return false;
+    }
+
+    true
+}
+
+/// Validates a batch of goal requests.
+///
+/// # Returns
+/// * `Ok(())` if all requests have valid structure
+/// * `Err(())` if any request is malformed
+pub fn validate_batch(requests: &soroban_sdk::Vec<SavingsGoalRequest>) -> Result<(), ()> {
+    // Check that batch is not empty
+    if requests.is_empty() {
+        return Err(());
+    }
+
+    // Basic structural validation
+    // Individual validation happens during processing
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::{symbol_short, testutils::Address as _, Env};
+
+    fn create_valid_request(env: &Env) -> SavingsGoalRequest {
+        SavingsGoalRequest {
+            user: Address::generate(env),
+            goal_name: symbol_short!("vacation"),
+            target_amount: 100_000_000, // 10 XLM
+            deadline: env.ledger().sequence() as u64 + 1000,
+            initial_contribution: 10_000_000, // 1 XLM
+        }
+    }
+
+    #[test]
+    fn test_valid_goal_request() {
+        let env = Env::default();
+        let request = create_valid_request(&env);
+        assert!(validate_goal_request(&env, &request).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_amount_too_low() {
+        let env = Env::default();
+        let mut request = create_valid_request(&env);
+        request.target_amount = 1000; // Below minimum
+        assert_eq!(
+            validate_goal_request(&env, &request),
+            Err(ErrorCode::INVALID_AMOUNT)
+        );
+    }
+
+    #[test]
+    fn test_invalid_amount_negative() {
+        let env = Env::default();
+        let mut request = create_valid_request(&env);
+        request.target_amount = -1000;
+        assert_eq!(
+            validate_goal_request(&env, &request),
+            Err(ErrorCode::INVALID_AMOUNT)
+        );
+    }
+
+    #[test]
+    fn test_invalid_deadline_past() {
+        let env = Env::default();
+        let mut request = create_valid_request(&env);
+        request.deadline = 0; // Past deadline
+        assert_eq!(
+            validate_goal_request(&env, &request),
+            Err(ErrorCode::INVALID_DEADLINE)
+        );
+    }
+
+    #[test]
+    fn test_invalid_initial_contribution_negative() {
+        let env = Env::default();
+        let mut request = create_valid_request(&env);
+        request.initial_contribution = -1000;
+        assert_eq!(
+            validate_goal_request(&env, &request),
+            Err(ErrorCode::INVALID_INITIAL_CONTRIBUTION)
+        );
+    }
+
+    #[test]
+    fn test_invalid_initial_contribution_exceeds_target() {
+        let env = Env::default();
+        let mut request = create_valid_request(&env);
+        request.initial_contribution = request.target_amount + 1;
+        assert_eq!(
+            validate_goal_request(&env, &request),
+            Err(ErrorCode::INVALID_INITIAL_CONTRIBUTION)
+        );
+    }
+
+    #[test]
+    fn test_is_valid_amount() {
+        assert!(is_valid_amount(MIN_GOAL_AMOUNT));
+        assert!(is_valid_amount(MAX_GOAL_AMOUNT));
+        assert!(is_valid_amount(100_000_000));
+        assert!(!is_valid_amount(MIN_GOAL_AMOUNT - 1));
+        assert!(!is_valid_amount(MAX_GOAL_AMOUNT + 1));
+        assert!(!is_valid_amount(-1000));
+    }
+
+    #[test]
+    fn test_is_valid_deadline() {
+        let env = Env::default();
+        let current = env.ledger().sequence() as u64;
+
+        assert!(is_valid_deadline(&env, current + 100));
+        assert!(is_valid_deadline(&env, current + 1000000));
+        assert!(!is_valid_deadline(&env, current));
+        assert!(!is_valid_deadline(&env, current - 100));
+    }
+
+    #[test]
+    fn test_is_valid_initial_contribution() {
+        assert!(is_valid_initial_contribution(0, 100_000_000));
+        assert!(is_valid_initial_contribution(50_000_000, 100_000_000));
+        assert!(is_valid_initial_contribution(100_000_000, 100_000_000));
+        assert!(!is_valid_initial_contribution(-1, 100_000_000));
+        assert!(!is_valid_initial_contribution(100_000_001, 100_000_000));
+    }
+}
