@@ -8,8 +8,10 @@ members = [
     "contracts/batch-conversion",
     "contracts/batch-rewards",
     "contracts/budget-recommendations",
+    "contracts/spending-limits",
     "contracts/savings-goals",
     "contracts/budget-allocation",
+
 ]
 
 [workspace.package]
